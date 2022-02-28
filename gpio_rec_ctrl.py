@@ -22,14 +22,6 @@ buffer_size = "150M" # mbuffer
 target_directory = '/srv/gpiorec/'
 
 
-def do_every (interval, worker_func, iterations = 0):
-    worker_func()
-    if iterations != 1:
-        Timer( interval, do_every, 
-                [interval, worker_func, 0 if iterations == 0 else iterations-1]
-                ).start ()
-
-
 class Led_driver:
     def __init__(self, scheme="ready"):
         self.running = True
@@ -170,7 +162,7 @@ def main():
             recording = not recording
             log.info("recording " + ("started" if recording else "stopped"))
             led_driver.scheme = "record" if recording else "ready"
-            sleep(1)
+            sleep(1) # debounce
     except KeyboardInterrupt:
         led_driver.scheme = "busy"
         recorder.stop()
