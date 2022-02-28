@@ -1,0 +1,17 @@
+[Unit]
+Description=Record with gpio
+After=remote-fs.target
+After=syslog.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/usr/local/src/gpio/
+ExecStart=/usr/local/src/gpio/gpio_rec_ctrl.py
+StandardOutput=syslog
+StandardError=syslog
+
+[Install]
+WantedBy=multi-user.target
+

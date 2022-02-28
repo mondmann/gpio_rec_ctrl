@@ -1,3 +1,4 @@
+#!/usr/bin/python3 -u
 
 import datetime
 import subprocess
@@ -5,9 +6,10 @@ import os
 import logging as log
 from gpiozero import LED, Button
 from time import sleep
-from threading import Thread
+from threading import Thread, Timer
+from typing import Optional
 
-log.basicConfig(level=log.DEBUG)
+log.basicConfig(level=log.INFO)
 
 # TODO: add config file
 
@@ -17,18 +19,27 @@ button = Button(7)
 max_recoding_time = 180 # min
 bit_rate = 128 # lame --abr param
 buffer_size = "150M" # mbuffer 
+target_directory = '/srv/gpiorec/'
 
-led_scheme = {
-        "ready": (2,0.05,0.1,0.05),
-        "busy": (0.2,0.2),
-        "record": (0.5,2),
-        }
+
+def do_every (interval, worker_func, iterations = 0):
+    worker_func()
+    if iterations != 1:
+        Timer( interval, do_every, 
+                [interval, worker_func, 0 if iterations == 0 else iterations-1]
+                ).start ()
 
 
 class Led_driver:
-    def __init__(self, scheme=led_scheme["ready"]):
-        self.set_scheme(scheme)
+    def __init__(self, scheme="ready"):
         self.running = True
+        self.led_schemes = {
+        "ready": (2,0.05,0.1,0.05),
+        "busy": (0.2,0.2),
+        "record": (0.5,2),
+        "error": (0.05,0.05),
+        }
+        self.set_scheme(scheme)
 
     def stop(self):
         log.debug(f"{type(self).__name__} stopped" )
@@ -37,25 +48,29 @@ class Led_driver:
     def run(self):
         led.off()
         while self.running:
-            for delay in self.scheme:
-                if self.new_scheme: 
+            for delay in self._scheme:
+                if self._new_scheme: 
                     led.off()
-                    self.new_scheme = False
+                    self._new_scheme = False
                     break
                 sleep(delay)
-                if self.new_scheme: 
+                if self._new_scheme: 
                     led.off()
-                    self.new_scheme = False
+                    self._new_scheme = False
                     break
                 led.toggle()
 
-    def set_scheme(self, scheme):
-        log.debug(f"{type(self).__name__} scheme set to {scheme}")
-        self._scheme = scheme
-        self.new_scheme = True
+    def set_scheme(self, scheme: str):
+        if scheme not in self.led_schemes.keys():
+            log.error(f"{type(self).__name__} invalid scheme " + scheme)
+        else:
+            log.debug(f"{type(self).__name__} scheme set to {scheme}")
+            self._scheme = self.led_schemes[scheme]
+            self._new_scheme = True
+            self._scheme_name = scheme
 
     def get_scheme(self):
-        return self._scheme
+        return self._scheme_name
 
     scheme = property(fget=get_scheme, fset=set_scheme)
 
@@ -64,6 +79,7 @@ class Recorder:
     def __init__(self, target_directory=os.getcwd()):
         self.target_directory = target_directory
         self.recording = False
+        self.error = False
         self.wavrecord = self.buffer = self.lame = None
 
     def run(self): # blocking, use in Thread if necessary
@@ -77,7 +93,7 @@ class Recorder:
                     .replace('T', '--').replace(':', "-") + ".mp3")
             self.recording = True
             self.wavrecord = subprocess.Popen(
-                    "arecord --quiet --fomat=dat --file-type=raw".split(),
+                    "arecord --quiet --format=dat --file-type=raw".split(),
                     stdout=subprocess.PIPE)
             self.buffer = subprocess.Popen(
                     f"mbuffer -q -m {buffer_size}".split(),
@@ -91,7 +107,12 @@ class Recorder:
             self.wavrecord.wait()
             self.buffer.wait()
             self.lame.wait()
-            log.debug(f"{type(self).__name__} subprocesses terminated")
+            self.error = not all([0 == x.returncode for x in [self.wavrecord, self.buffer, self.lame]])
+            log.log(log.ERROR if self.error  else log.DEBUG,
+                    f"{type(self).__name__} subprocesses terminated  (" +
+                    f"record: {self.wavrecord.returncode}, " +
+                    f"buffer: {self.buffer.returncode}, " +
+                    f"lame: {self.lame.returncode})")
             self.recording = False
 
     def stop(self):
@@ -99,37 +120,68 @@ class Recorder:
         log.debug(f"{type(self).__name__} terminating wavrecord")
         self.wavrecord.terminate()
 
+class Watchdog:
+    """
+        compare state of led_driver with recorder (consistency check)
+        check for timeout and stop recording 
+    """
+    def __init__(self, recorder: Optional[Recorder] = None, led_driver: Optional[Led_driver] = None, timeout=5400):
+        self.recorder = recorder
+        self.led_driver = led_driver
+        self.timeout = timeout # in seconds
+        self.start_time = None
 
-led_driver = Led_driver()
-led_thread = Thread(target=lambda : led_driver.run())
-led_thread.start()
+    def run(self):
+        if not self.recorder or not self.led_driver:
+            log.warning(f"{type(self).__name__} " +
+                    f"recorder {'registered' if self.recorder else 'missing'}, "+
+                    f"led_driver {'registered' if self.led_driver else 'missing'}")
+            return # nothing to do
+                     
+        pass # TODO
 
-try:
-    recording = False
-    while True:
-        log.debug("waiting for button press")
-        button.wait_for_press()
-        button.wait_for_release()
-        log.debug("button pressed")
-        if not recording: # start it
-            log.debug("start recording...")
-            recorder = Recorder() # FIXME: Path in Config
-            recorder_thread = Thread(target=lambda : recorder.run())
-            recorder_thread.start()
-        else: # stop it
-            log.debug("stop recording...")
-            led_driver.scheme = led_scheme["busy"]
-            recorder.stop()
-            retval = recorder_thread.join() # FIXME check retval
-        recording = not recording
-        log.info("recording " + ("started" if recording else "stopped"))
-        led_driver.scheme = led_scheme["record" if recording else "ready"]
-        sleep(1)
+def main():
+    log.info("starting...")
+    led_driver = Led_driver()
+    led_thread = Thread(target=lambda : led_driver.run())
+    led_thread.start()
 
+    watchdog = Watchdog(led_driver=led_driver)
+    watchdog_thread = Thread(target=lambda : do_every(3, watchdog.run()))
+    watchdog_thread.start()
 
-except KeyboardInterrupt:
-    led_driver.scheme = led_scheme["busy"]
-    recorder.stop()
-    recorder_thread.join()
-    led_driver.stop()
-    led_thread.join(3)
+    try:
+        recording = False
+        while True:
+            log.debug("waiting for button press")
+            button.wait_for_press()
+            button.wait_for_release()
+            log.debug("button pressed")
+            if not recording: # start it
+                log.debug("start recording...")
+                recorder = Recorder(target_directory) 
+                recorder_thread = Thread(target=lambda : recorder.run())
+                recorder_thread.start()
+            else: # stop it
+                log.debug("stop recording...")
+                led_driver.scheme = "busy"
+                recorder.stop()
+                retval = recorder_thread.join() # FIXME check retval
+            recording = not recording
+            log.info("recording " + ("started" if recording else "stopped"))
+            led_driver.scheme = "record" if recording else "ready"
+            sleep(1)
+    except KeyboardInterrupt:
+        led_driver.scheme = "busy"
+        recorder.stop()
+        recorder_thread.join()
+        led_driver.stop()
+        watchdog_thread.stop()
+        led_thread.join(3)
+        watchdog_thread.join(3)
+
+# TODO: Watchdog Thread with
+# - check for recording too long
+# - check for recording stopped with error
+
+if __name__ == "__main__": main()
