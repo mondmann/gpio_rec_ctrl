@@ -12,8 +12,11 @@ from typing import Optional
 log.basicConfig(level=log.INFO)
 
 # TODO: add config file
+config = dict(
+    led_number=8,
+    button_number=7,
+)
 
-led = LED(8)
 button = Button(7)
 
 max_recoding_time = 180 # min
@@ -22,12 +25,29 @@ buffer_size = "150M" # mbuffer
 target_directory = '/srv/gpiorec/'
 
 
-def do_every (interval, worker_func, iterations = 0):
-    worker_func()
-    if iterations != 1:
-        Timer( interval, do_every, 
-                [interval, worker_func, 0 if iterations == 0 else iterations-1]
-                ).start ()
+class ButtonHandler():
+    __whenButtonCallback = None
+
+    def __init__(self, pin, whenButtonCallback):
+        # whenMotionCallback is an async function
+        self.__whenMotionCallback = whenMotionCallback
+
+        # Just init the sensor with gpiozero lib
+        motionSensor = MotionSensor(pin)
+
+        # Method to call when motion is detected
+        motionSensor.when_motion = self.whenMotion
+
+    def whenMotion(self):
+        # Create new asyncio loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        future = asyncio.ensure_future(self.__executeWhenMotionCallback()) # Execute async method
+        loop.run_until_complete(future)
+        loop.close()
+
+    async def __executeWhenMotionCallback(self):
+        await self.__whenMotionCallback()
 
 
 class Led_driver:
@@ -40,25 +60,26 @@ class Led_driver:
         "error": (0.05,0.05),
         }
         self.set_scheme(scheme)
+        self._led = LED(config["led_number"])
 
     def stop(self):
         log.debug(f"{type(self).__name__} stopped" )
         self.running = False
 
-    def run(self):
-        led.off()
+    async def run(self):
+        self._led.off()
         while self.running:
             for delay in self._scheme:
                 if self._new_scheme: 
-                    led.off()
+                    self._led.off()
                     self._new_scheme = False
                     break
-                sleep(delay)
+                asyncio.sleep(delay)
                 if self._new_scheme: 
-                    led.off()
+                    self._led.off()
                     self._new_scheme = False
                     break
-                led.toggle()
+                self._led.toggle()
 
     def set_scheme(self, scheme: str):
         if scheme not in self.led_schemes.keys():
