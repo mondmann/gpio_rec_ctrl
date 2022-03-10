@@ -18,6 +18,7 @@ config = dict(
     max_recording_time=180,
     target_directory="/srv/gpiorec",
     block_size=4096,  # FIXME: use page size from "getconf PAGESIZE"
+    device="hw:1"
 )
 
 
@@ -31,9 +32,12 @@ class ButtonHandler:
     async def run(self):
         self.running = True
         while self.running:
-            if await self._button.read_async() and not await self._button.read_async():
-                await self.callback()
-                await asyncio.sleep(1)  # bounce protection
+            log.debug(f"{type(self).__name__} waiting for button press...")
+            state = await self._button.read_async()
+            while not state == await self._button.read_async():
+                pass
+            await self.callback()
+            await asyncio.sleep(1)  # bounce protection
 
 
 class LedDriver:
@@ -106,8 +110,8 @@ class Recorder(Subprocess):
         log.debug(f"{type(self).__name__} set up recording")
         self.error = False
         self.recording = True
-        self.subprocess = await asyncio.create_subprocess_shell(
-            "arecord --quiet --format=dat --file-type=raw",
+        self.subprocess = await asyncio.create_subprocess_exec(
+            "arecord", f"-D{config['device']}", "--quiet", "--format=dat", "--file-type=raw",
             stdout=asyncio.subprocess.PIPE
         )
         log.debug(f"{type(self).__name__} started recording")
@@ -119,11 +123,11 @@ class Recorder(Subprocess):
                 break  # end of data
 
         await self.subprocess.wait()
-        self.error = not 0 == self.subprocess.returncode
+        # arecord seems to exit with 1 on signal TERM
+        self.error = not 1 == self.subprocess.returncode
         log.log(log.ERROR if self.error else log.DEBUG,
-                f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode}")
+                f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode} (expected 1)")
         self.recording = False
-
 
 
 class Encoder(Subprocess):
@@ -140,8 +144,8 @@ class Encoder(Subprocess):
         outfilename = os.path.join(self.target_directory,
                                    datetime.datetime.now().replace(microsecond=0).isoformat()
                                    .replace('T', '--').replace(':', "-") + ".mp3")
-        self.subprocess = await asyncio.create_subprocess_shell(
-            f"lame --quiet -r --abr {config['bit_rate']} - '{outfilename}'",
+        self.subprocess = await asyncio.create_subprocess_exec(
+            f"lame", "-s", "48", "--quiet", "-r", "--abr", f"{config['bit_rate']}", "-", outfilename,
             stdin=asyncio.subprocess.PIPE
         )
         log.debug(f"{type(self).__name__} started encoding")
@@ -220,7 +224,7 @@ class Controller:
             self.state = State.IDLE
         assert queue.empty()
 
-    async def stop_recording(self):
+    def stop_recording(self):
         self.recorder.stop()
         self.led_driver.scheme = "busy"
         self.state = State.WRITING
@@ -230,9 +234,9 @@ class Controller:
         if self.state == State.ERROR:
             return  # ignore button in error state
         if self.state == State.IDLE:
-            await self.do_recording()
+            asyncio.create_task(self.do_recording())
         if self.state == State.RECORDING:
-            await self.stop_recording()
+            self.stop_recording()
         if self.state == State.WRITING:
             return  # ignore until done
 
