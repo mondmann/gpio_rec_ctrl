@@ -15,7 +15,7 @@ config = dict(
     led_number=8,
     button_number=7,
     bit_rate=128,  # lame --abr param
-    max_recording_time=180,
+    max_recording_time=datetime.timedelta(hours=2).total_seconds(),  # seconds
     target_directory="/srv/gpiorec",
     block_size=4096,  # FIXME: use page size from "getconf PAGESIZE"
     device="hw:1"
@@ -162,7 +162,8 @@ class Encoder(Subprocess):
         await self.subprocess.wait()
         self.error = not 0 == self.subprocess.returncode
         log.log(log.ERROR if self.error else log.DEBUG,
-                f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode}")
+                f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode} (expected 0))")
+
 
 
 class StopTimer:
@@ -177,12 +178,14 @@ class StopTimer:
 
     async def _job(self):
         await asyncio.sleep(self._timeout)
+        log.warning(f"{type(self).__name__} timeout reached!")
         if asyncio.iscoroutine(self._callback):
             await self._callback()
         else:
             self._callback()
 
     def cancel(self):
+        log.debug(f"{type(self).__name__} canceled.")
         self._task.cancel()
 
 
@@ -215,13 +218,23 @@ class Controller:
         self.stop_timer = StopTimer(config['max_recording_time'], self.stop_recording)
         self.led_driver.scheme = "record"
         self.state = State.RECORDING
-        await asyncio.gather(self.recorder.run(), self.encoder.run())
-        if self.encoder.error or self.recorder.error:
-            self.led_driver.scheme = "error"
+        try:
+            await asyncio.gather(self.recorder.run(), self.encoder.run())
+            if self.encoder.error or self.recorder.error:
+                self.led_driver.scheme = "error"
+                self.state = State.ERROR
+            else:
+                self.led_driver.scheme = "ready"
+                self.state = State.IDLE
+        except ConnectionResetError as e:
             self.state = State.ERROR
-        else:
-            self.led_driver.scheme = "ready"
-            self.state = State.IDLE
+            self.led_driver.scheme = "error"
+
+        if self.encoder.error:
+            log.error(f'{type(self).__name__} encoder error occurred (see logs)')
+        if self.recorder.error:
+            log.error(f'{type(self).__name__} recorder error occurred (see logs)')
+
         if not queue.empty():
             log.error(f"{type(self).__name__} queue is not empty")
             self.led_driver.scheme = "error"
