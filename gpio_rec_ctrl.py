@@ -165,7 +165,7 @@ class Encoder(Subprocess):
                 f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode}")
 
 
-class Watchdog:
+class StopTimer:
     """
         check for timeout and stop recording if necessary
     """
@@ -197,9 +197,9 @@ class Controller:
     def __init__(self):
         self.led_driver = None
         self.button_handler = None
-        self.recorder = None  #
-        self.encoder = None
-        self.watchdog = None
+        self.recorder = None  # per recording object
+        self.encoder = None   # per recording object
+        self.stop_timer = None  # per recording object
         self.state = State.IDLE
 
     async def run(self):
@@ -212,7 +212,7 @@ class Controller:
         queue = asyncio.Queue()
         self.recorder = Recorder(queue)
         self.encoder = Encoder(queue, config['target_directory'])
-        self.watchdog = Watchdog(config['max_recording_time'], self.stop_recording)
+        self.stop_timer = StopTimer(config['max_recording_time'], self.stop_recording)
         self.led_driver.scheme = "record"
         self.state = State.RECORDING
         await asyncio.gather(self.recorder.run(), self.encoder.run())
@@ -222,12 +222,18 @@ class Controller:
         else:
             self.led_driver.scheme = "ready"
             self.state = State.IDLE
-        assert queue.empty()
+        if not queue.empty():
+            log.error(f"{type(self).__name__} queue is not empty")
+            self.led_driver.scheme = "error"
+            self.state = State.ERROR
 
     def stop_recording(self):
+        self.stop_timer.cancel()
+        self.stop_timer = None
         self.recorder.stop()
         self.led_driver.scheme = "busy"
         self.state = State.WRITING
+        # now wait for encoder to terminate
 
     async def handle_button_press(self):
         log.debug(f"{type(self).__name__} button press in state {self.state}")
