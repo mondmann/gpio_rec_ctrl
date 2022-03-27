@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import os
 import logging as log
+import getpass
 from enum import Enum
 
 from gpiozero import LED
@@ -262,6 +263,7 @@ class Controller:
 
 def main():
     log.info("starting...")
+    log.debug(f"user {getpass.getuser()}")
     asyncio.run(Controller().run())
     log.info("shutdown...")
 

@@ -1,16 +1,18 @@
 [Unit]
-Description=Record with gpio
+Description=Service to record mp3 with gpio button to /srv/gpiorec/
 After=remote-fs.target
-After=syslog.target
 
 [Service]
+# wait for system to settle down
+ExecStartPre=/usr/bin/sleep 45
+Restart=always
 Type=simple
 User=pi
 Group=pi
 WorkingDirectory=/usr/local/src/gpio/
 ExecStart=/usr/local/src/gpio/gpio_rec_ctrl.py
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
