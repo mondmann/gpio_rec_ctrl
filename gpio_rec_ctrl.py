@@ -6,6 +6,7 @@ import logging as log
 import getpass
 from enum import Enum
 
+from aiohttp import web
 from gpiozero import LED
 from apgpio import GPIO
 
@@ -19,7 +20,9 @@ config = dict(
     max_recording_time=datetime.timedelta(hours=2).total_seconds(),  # seconds
     target_directory="/srv/gpiorec",
     block_size=4096,  # FIXME: use page size from "getconf PAGESIZE"
-    device="hw:1"
+    device="hw:1",
+    http_port=8080,
+    http_listen_address="127.0.0.1",
 )
 
 
@@ -196,21 +199,45 @@ class State(Enum):
     WRITING = 2
     ERROR = 42
 
+class HttpServer:
+    def __init__(self):
+        app = web.Application()
+        app.add_routes([web.get('/', self.handle),
+                        web.get('/{name}', self.handle)])
+        self.runner = web.AppRunner(app)
+        self.site = None
+
+    async def run(self):
+        await self.runner.setup()
+        self.site = web.TCPSite(self.runner, config['http_listen_address'], config['http_port'])
+        await self.site.start()
+
+    async def stop(self):
+        await self.runner.cleanup()
+
+    async def handle(self, request):
+        # name = request.match_info.get('name', "Anonymous")
+        # text = "Hello, " + name
+        text = "Hello World"
+        return web.Response(text=text)
+
 
 class Controller:
     def __init__(self):
         self.led_driver = None
         self.button_handler = None
-        self.recorder = None  # per recording object
-        self.encoder = None   # per recording object
-        self.stop_timer = None  # per recording object
+        self.http_server = None
+        self.recorder = None    # each time per recording object
+        self.encoder = None     # each time per recording object
+        self.stop_timer = None  # each time per recording object
         self.state = State.IDLE
 
     async def run(self):
         self.led_driver = LedDriver()  # running continuously
         # loop ist noch accessible in constructor!
         self.button_handler = ButtonHandler(self.handle_button_press, loop=asyncio.get_event_loop())
-        await asyncio.gather(self.led_driver.run(), self.button_handler.run())
+        self.http_server = HttpServer()
+        await asyncio.gather(self.led_driver.run(), self.button_handler.run(), self.http_server.run())
 
     async def do_recording(self):
         queue = asyncio.Queue()
