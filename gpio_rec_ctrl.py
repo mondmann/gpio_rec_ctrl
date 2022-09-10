@@ -4,8 +4,10 @@ import datetime
 import os
 import logging as log
 import getpass
+import time
 from enum import Enum
 
+import aiohttp
 from aiohttp import web
 from gpiozero import LED
 from apgpio import GPIO
@@ -17,12 +19,13 @@ config = dict(
     led_number=8,
     button_number=7,
     bit_rate=128,  # lame --abr param
+    sample_frequency = "44.1",  # 8/11.025/12/16/22.05/24/32/44.1/48 # !FIXME
     max_recording_time=datetime.timedelta(hours=2).total_seconds(),  # seconds
     target_directory="/srv/gpiorec",
     block_size=4096,  # FIXME: use page size from "getconf PAGESIZE"
-    device="hw:1",
+    device="hw:2",  # :1", FIXME!
     http_port=8080,
-    http_listen_address="127.0.0.1",
+    http_listen_address="0.0.0.0",  # "127.0.0.1",
 )
 
 
@@ -109,13 +112,18 @@ class Recorder(Subprocess):
         self.subprocess = None
         self.recording = False
         self.error = False
+        self.start_time = None
 
     async def run(self):
         log.debug(f"{type(self).__name__} set up recording")
         self.error = False
         self.recording = True
+        self.start_time = time.time()
         self.subprocess = await asyncio.create_subprocess_exec(
-            "arecord", f"-D{config['device']}", "--quiet", "--format=dat", "--file-type=raw",
+            "arecord", f"-D{config['device']}", "--quiet",
+            "-c", "1", # "2", # FIXME!
+            "-r", f"{float(config['sample_frequency']) * 1000:.0f}",
+            "-f", "S16_LE", "--file-type=raw",
             stdout=asyncio.subprocess.PIPE
         )
         log.debug(f"{type(self).__name__} started recording")
@@ -132,6 +140,10 @@ class Recorder(Subprocess):
         log.log(log.ERROR if self.error else log.DEBUG,
                 f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode} (expected 1)")
         self.recording = False
+        self.start_time = None
+
+    def time_elapsed(self):
+        return time.time() - self.start_time if self.start_time is not None else None
 
 
 class Encoder(Subprocess):
@@ -145,11 +157,14 @@ class Encoder(Subprocess):
     async def run(self):
         log.debug(f"{type(self).__name__} set up encoding")
         self.error = False
-        outfilename = os.path.join(self.target_directory,
-                                   datetime.datetime.now().replace(microsecond=0).isoformat()
-                                   .replace('T', '--').replace(':', "-") + ".mp3")
+        self.outfilename = os.path.join(self.target_directory,
+                                        datetime.datetime.now().replace(microsecond=0).isoformat()
+                                        .replace('T', '--').replace(':', "-") + ".mp3")
         self.subprocess = await asyncio.create_subprocess_exec(
-            f"lame", "-s", "48", "--quiet", "-r", "--abr", f"{config['bit_rate']}", "-", outfilename,
+            "lame", "-s", config['sample_frequency'], "--quiet", "-r",
+            "-m", "m", # mono FIXME!
+            "--abr", f"{config['bit_rate']}", "-",
+            self.outfilename,
             stdin=asyncio.subprocess.PIPE
         )
         log.debug(f"{type(self).__name__} started encoding")
@@ -167,7 +182,6 @@ class Encoder(Subprocess):
         self.error = not 0 == self.subprocess.returncode
         log.log(log.ERROR if self.error else log.DEBUG,
                 f"{type(self).__name__} subprocesses terminated (return code {self.subprocess.returncode} (expected 0))")
-
 
 
 class StopTimer:
@@ -199,27 +213,79 @@ class State(Enum):
     WRITING = 2
     ERROR = 42
 
+
 class HttpServer:
-    def __init__(self):
+    def __init__(self, controller=None):
         app = web.Application()
         app.add_routes([web.get('/', self.handle),
-                        web.get('/{name}', self.handle)])
+                        web.get('/status', self.handle_status),
+                        web.post('/start', self.handle_start_recording),
+                        web.post('/stop', self.handle_stop_recording),
+                        web.static('/static', 'static', follow_symlinks=True)])
         self.runner = web.AppRunner(app)
         self.site = None
+        self.controller = controller
 
     async def run(self):
+        log.debug(f"{type(self).__name__} start http server ({config['http_listen_address']}:{config['http_port']})")
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, config['http_listen_address'], config['http_port'])
         await self.site.start()
 
     async def stop(self):
+        log.debug(f"{type(self).__name__} stop http server ({config['http_listen_address']}:{config['http_port']})")
         await self.runner.cleanup()
 
     async def handle(self, request):
         # name = request.match_info.get('name', "Anonymous")
         # text = "Hello, " + name
-        text = "Hello World"
-        return web.Response(text=text)
+        # text = "Hello World"
+        # return web.Response(text=text)
+        raise aiohttp.web.HTTPFound('static/web_client.html')
+
+    async def handle_status(self, request):
+        log.debug(f"{type(self).__name__} status request")
+        if self.controller.recorder is None:
+            time_elapsed = None
+            time_string = "––:––:––"
+        else:
+            time_elapsed = self.controller.recorder.time_elapsed()
+            time_string = f"{time_elapsed // 60 // 60:02.0f}:{time_elapsed // 60 % 60:02.0f}:{time_elapsed % 60:02.0f}"\
+                if time_elapsed is not None else None
+        status = {
+            'status': self.controller.state.name,
+            'filename': None if self.controller.encoder is None
+            else os.path.basename(self.controller.encoder.outfilename),
+            'time': time_elapsed,
+            'time_string': time_string,
+        }
+        return web.json_response(status)
+
+    async def handle_start_recording(self, request):
+        data = await request.post()
+        if data['start'] != 'start':
+            raise aiohttp.web.HTTPBadRequest()
+        log.debug(f"{type(self).__name__} start request in state {self.controller.state}")
+        if self.controller.state == State.ERROR:
+            raise aiohttp.web.HTTPInternalServerError()
+        if self.controller.state == State.IDLE:
+            self.controller.start_recording()
+            raise aiohttp.web.HTTPFound('.')
+        if self.controller.state == State.RECORDING or self.controller.state == State.WRITING:
+            raise aiohttp.web.HTTPConflict()
+
+    async def handle_stop_recording(self, request):
+        data = await request.post()
+        if data['stop'] != 'stop':
+            raise aiohttp.web.HTTPBadRequest()
+        log.debug(f"{type(self).__name__} stop request in state {self.controller.state}")
+        if self.controller.state == State.ERROR:
+            raise aiohttp.web.HTTPInternalServerError()
+        if self.controller.state == State.RECORDING:
+            self.controller.stop_recording()
+            raise aiohttp.web.HTTPFound('.')
+        if self.controller.state == State.IDLE or self.controller.state == State.WRITING:
+            raise aiohttp.web.HTTPConflict()
 
 
 class Controller:
@@ -227,8 +293,8 @@ class Controller:
         self.led_driver = None
         self.button_handler = None
         self.http_server = None
-        self.recorder = None    # each time per recording object
-        self.encoder = None     # each time per recording object
+        self.recorder = None  # each time per recording object
+        self.encoder = None  # each time per recording object
         self.stop_timer = None  # each time per recording object
         self.state = State.IDLE
 
@@ -236,7 +302,7 @@ class Controller:
         self.led_driver = LedDriver()  # running continuously
         # loop ist noch accessible in constructor!
         self.button_handler = ButtonHandler(self.handle_button_press, loop=asyncio.get_event_loop())
-        self.http_server = HttpServer()
+        self.http_server = HttpServer(self)
         await asyncio.gather(self.led_driver.run(), self.button_handler.run(), self.http_server.run())
 
     async def do_recording(self):
@@ -247,13 +313,18 @@ class Controller:
         self.led_driver.scheme = "record"
         self.state = State.RECORDING
         try:
-            await asyncio.gather(self.recorder.run(), self.encoder.run())
-            if self.encoder.error or self.recorder.error:
+            try:
+                await asyncio.gather(self.recorder.run(), self.encoder.run())
+                if self.encoder.error or self.recorder.error:
+                    self.led_driver.scheme = "error"
+                    self.state = State.ERROR
+                else:
+                    self.led_driver.scheme = "ready"
+                    self.state = State.IDLE
+            except FileNotFoundError as e:
+                log.error(f"File not found: {e.filename}")
                 self.led_driver.scheme = "error"
                 self.state = State.ERROR
-            else:
-                self.led_driver.scheme = "ready"
-                self.state = State.IDLE
         except ConnectionResetError as e:
             self.state = State.ERROR
             self.led_driver.scheme = "error"
@@ -276,12 +347,15 @@ class Controller:
         self.state = State.WRITING
         # now wait for encoder to terminate
 
+    def start_recording(self):
+        asyncio.create_task(self.do_recording())
+
     async def handle_button_press(self):
         log.debug(f"{type(self).__name__} button press in state {self.state}")
         if self.state == State.ERROR:
             return  # ignore button in error state
         if self.state == State.IDLE:
-            asyncio.create_task(self.do_recording())
+            self.start_recording()
         if self.state == State.RECORDING:
             self.stop_recording()
         if self.state == State.WRITING:
