@@ -17,4 +17,13 @@ for Raspberry Pi
 # TODO
 
 - config file
+- `setuptools`
 
+# Instalation
+
+No `setuptools` yet. So `clone` repository and install dependencies:
+
+```angular2html
+$ pip install -r requirements.txt
+$ bower install # needs bower: npm install -g bower
+```
