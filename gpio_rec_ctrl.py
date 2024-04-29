@@ -19,13 +19,13 @@ config = dict(
     led_number=8,
     button_number=7,
     bit_rate=128,  # lame --abr param
-    sample_frequency = "44.1",  # 8/11.025/12/16/22.05/24/32/44.1/48 # !FIXME
+    sample_frequency = "48",  # 8/11.025/12/16/22.05/24/32/44.1/48 # !FIXME
     max_recording_time=datetime.timedelta(hours=2).total_seconds(),  # seconds
     target_directory="/srv/gpiorec",
     block_size=4096,  # FIXME: use page size from "getconf PAGESIZE"
-    device="hw:2",  # :1", FIXME!
+    device="hw:1",  # :1", FIXME!
     http_port=8080,
-    http_listen_address="0.0.0.0",  # "127.0.0.1",
+    http_listen_address="127.0.0.1",
 )
 
 
@@ -121,7 +121,8 @@ class Recorder(Subprocess):
         self.start_time = time.time()
         self.subprocess = await asyncio.create_subprocess_exec(
             "arecord", f"-D{config['device']}", "--quiet",
-            "-c", "1", # "2", # FIXME!
+            #"-c", "1", # "2", # FIXME!
+            "-c", "2", 
             "-r", f"{float(config['sample_frequency']) * 1000:.0f}",
             "-f", "S16_LE", "--file-type=raw",
             stdout=asyncio.subprocess.PIPE
@@ -162,7 +163,7 @@ class Encoder(Subprocess):
                                         .replace('T', '--').replace(':', "-") + ".mp3")
         self.subprocess = await asyncio.create_subprocess_exec(
             "lame", "-s", config['sample_frequency'], "--quiet", "-r",
-            "-m", "m", # mono FIXME!
+            # "-m", "m", # mono FIXME!
             "--abr", f"{config['bit_rate']}", "-",
             self.outfilename,
             stdin=asyncio.subprocess.PIPE
