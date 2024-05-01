@@ -17,7 +17,7 @@ log.basicConfig(level=log.DEBUG)
 # TODO: add config file
 config = dict(
     led_number=8,
-    button_number=7,
+    button_number=519, #7,  i. e. /sys/class/gpio/gpiochip512/ with offset 512 / FIXME: sys api is deprecated for gpio:q
     bit_rate=128,  # lame --abr param
     sample_frequency = "48",  # 8/11.025/12/16/22.05/24/32/44.1/48 # !FIXME
     max_recording_time=datetime.timedelta(hours=2).total_seconds(),  # seconds
